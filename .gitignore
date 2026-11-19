@@ -5,3 +5,5 @@ CLAUDE.local.md
 .DS_Store
 Icon?
 *.gdoc
+# StatiCrypt source - never committed, Pages would serve it raw
+public-encrypted/

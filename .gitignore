@@ -7,3 +7,9 @@ Icon?
 *.gdoc
 # StatiCrypt source - never committed, Pages would serve it raw
 public-encrypted/
+
+# Key and credential files some tools create - never commit
+*.pem
+*.key
+credentials*.json
+service-account*.json

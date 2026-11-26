@@ -18,6 +18,12 @@ Usage:
     python3 scripts/encrypt/encrypt_public.py --show           # counts + where the secret lives, no values
     python3 scripts/encrypt/encrypt_public.py --count          # the number of pages a run would encrypt, nothing else
     python3 scripts/encrypt/encrypt_public.py --show --reveal  # the password table, terminal only, never in CI
+    python3 scripts/encrypt/encrypt_public.py --new-password c-x/page/index.html --code ABC
+                                       # new page password ThoughtfulX<CODE>_<4 random>, saved + copied to the clipboard
+    python3 scripts/encrypt/encrypt_public.py --copy c-x/page/index.html   # copy a page's password to the clipboard
+
+Per-page passwords: a page listed in .env.page-passwords (gitignored, one `relative/path.html=password` per line)
+uses that password instead of the derived one. --new-password writes the line; nothing ever prints the value.
 
 What a run never does: print a password (the table needs --reveal on a TTY), encrypt a page
 that is already StatiCrypt output (that would wrap it twice), fall back to StatiCrypt's own
@@ -67,6 +73,8 @@ OUTPUT_DIR = WORKSPACE / OUTPUT_SUBDIR
 TEMPLATE = Path(__file__).resolve().parent / "template.html"
 CONFIG_FILE = WORKSPACE / ".staticrypt.json"          # holds the salt every page was encrypted with
 FINGERPRINT_FILE = Path(__file__).resolve().parent / "encrypt-manifest.json"
+PAGE_PASSWORDS_FILE = WORKSPACE / ".env.page-passwords"   # gitignored by `.env.*`; per-page passwords, never committed
+PW_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789"   # no 0/O, 1/l/I: easy to read and type
 
 HTML_EXT = {".html", ".htm"}
 CONFIG_MARK = "staticryptConfig"
@@ -138,6 +146,42 @@ IN_CI = bool(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"))
 def derive_password(master_secret: str, relative_path: str) -> str:
     digest = hmac.new(master_secret.encode("utf-8"), relative_path.encode("utf-8"), hashlib.sha256).digest()
     return base64.urlsafe_b64encode(digest)[:24].decode("ascii")
+
+
+def load_page_passwords() -> dict:
+    out = {}
+    if PAGE_PASSWORDS_FILE.exists():
+        for line in PAGE_PASSWORDS_FILE.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, _, v = line.partition("=")
+                if k.strip() and v.strip():
+                    out[k.strip()] = v.strip()
+    return out
+
+
+def save_page_password(rel: str, password: str) -> None:
+    pw = load_page_passwords()
+    pw[rel] = password
+    body = "# Per-page StatiCrypt passwords (gitignored). Format: relative/path.html=password. Never commit or paste.\n"
+    body += "".join(f"{k}={v}\n" for k, v in sorted(pw.items()))
+    PAGE_PASSWORDS_FILE.write_text(body)
+    os.chmod(PAGE_PASSWORDS_FILE, 0o600)
+
+
+def copy_to_clipboard(value: str) -> None:
+    try:
+        subprocess.run(["pbcopy"], input=value, text=True, check=True)
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        sys.exit("Couldn't reach the clipboard (pbcopy is macOS only), so nothing was copied. Use --show --reveal on a terminal.")
+
+
+def new_page_password(code: str) -> str:
+    import secrets
+    code = re.sub(r"[^A-Za-z0-9]", "", code or "").upper()
+    if not code:
+        sys.exit("ERROR: --code needs the client code, e.g. --code NMJ.")
+    return f"ThoughtfulX{code}_" + "".join(secrets.choice(PW_ALPHABET) for _ in range(4))
 
 
 # ---------------------------------------------------------------- fingerprint
@@ -272,6 +316,9 @@ def main():
     parser.add_argument("--skip-unchanged", action="store_true", help="skip pages whose fingerprint (source+password+template+salt+tool) is current")
     parser.add_argument("--file", metavar="FILENAME", help="one file only (relative path or basename)")
     parser.add_argument("--count", action="store_true", help="print only the number of pages a run would encrypt, then stop")
+    parser.add_argument("--new-password", metavar="PAGE", help="give PAGE (path under public-encrypted/) a new password ThoughtfulX<CODE>_<4 random>, save it to .env.page-passwords and copy it to the clipboard; never printed")
+    parser.add_argument("--code", metavar="CODE", help="with --new-password: the client code in the password, e.g. NMJ")
+    parser.add_argument("--copy", metavar="PAGE", help="copy PAGE's current password to the clipboard; never printed")
     if ALLOW_DERIVED and DEFAULT_MODE == "shared":
         parser.add_argument("--derived", action="store_true", help="give the page(s) a derived per-file password instead of the shared one")
     args = parser.parse_args()
@@ -279,6 +326,17 @@ def main():
         if not SOURCE_DIR.exists():
             sys.exit(f"The folder {SOURCE_DIR.name}/ isn't there, so there's nothing to encrypt. Ask Claude to set up encryption in this folder.")
         print(len(select_pages(SOURCE_DIR)))
+        return
+
+    if args.new_password:
+        rel = args.new_password.strip().lstrip("/")
+        if not (SOURCE_DIR / rel).is_file():
+            sys.exit(f"I can't find {rel} in {SOURCE_DIR.name}/. Check the path, then run it again.")
+        pwd = new_page_password(args.code)
+        save_page_password(rel, pwd)
+        copy_to_clipboard(pwd)
+        print(f"New password for {rel} saved to {PAGE_PASSWORDS_FILE.name} and copied to the clipboard (not printed). "
+              "Run `make encrypt-changed` to re-encrypt the page with it.")
         return
 
     mode, secret = resolve_mode(args)
@@ -293,9 +351,24 @@ def main():
             sys.exit(f"I can't find {args.file} in {SOURCE_DIR.name}/. Check the name, then run it again.")
 
     passwords = {rel_paths[f]: (secret if mode == "shared" else derive_password(secret, rel_paths[f])) for f in html_files}
+    page_pw = load_page_passwords()
+    for rel in passwords:
+        if rel in page_pw:
+            passwords[rel] = page_pw[rel]
+
+    if args.copy:
+        rel = args.copy.strip().lstrip("/")
+        if rel not in passwords:
+            sys.exit(f"I can't find {rel} in {SOURCE_DIR.name}/. Check the path, then run it again.")
+        copy_to_clipboard(passwords[rel])
+        print(f"Password for {rel} copied to the clipboard (not printed).")
+        return
 
     if args.show:
         where = "ENCRYPT_PASSWORD in .env (one shared password)" if mode == "shared" else "derived per file from ENCRYPT_SECRET in .env"
+        n_own = sum(1 for r in passwords if r in page_pw)
+        if n_own:
+            where += f"; {n_own} page(s) use their own password from {PAGE_PASSWORDS_FILE.name}"
         print(f"\n{len(html_files)} page(s) under {SOURCE_DIR.relative_to(WORKSPACE)}/ - passwords: {where}.")
         if not args.reveal:
             print("Values are not printed. On a terminal, add --reveal to see the table; the secret itself lives in your password manager.")

@@ -15,17 +15,25 @@ concurrency:
   group: pages
   cancel-in-progress: false
 
+# Build and deploy are separate jobs (GitHub's recommended Pages layout). In one job, deploy-pages
+# sometimes looked up the artifact before GitHub had registered the upload and failed with
+# "No artifacts named github-pages were found" (PR #7 and #8, 26/11/2026).
 jobs:
-  deploy:
+  build:
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
           path: public   # only public/ is published; public-encrypted/ never is
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
       - id: deployment
         uses: actions/deploy-pages@v4
